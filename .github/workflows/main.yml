@@ -1,4 +1,4 @@
-name: GPU RDP VM with Roblox and Parsec (persistent)
+name: GPU RDP VM with Roblox
 
 on:
   workflow_dispatch:
@@ -10,163 +10,8 @@ jobs:
     steps:
       - name: Checkout Repo
         uses: actions/checkout@v3
-      # -------------------------
-      # 1️⃣ Setup Persistent VM with Hyper-V & GPU PV
-      # -------------------------
-      - name: Setup Persistent VM
-        shell: powershell
-        run: |
-          $VMName = "GPU-VM"
-          $VHDPath = "C:\HyperV\$VMName.vhdx"
-          $ISOPath = "C:\ISO\Windows.iso"
-          $Memory = 8GB
-          $CPU = 2
-          $VHDSize = 200GB
-          # Enable Hyper-V
-          dism.exe /Online /Enable-Feature:Microsoft-Hyper-V /All
-          # Create or start VM
-          if (Get-VM -Name $VMName -ErrorAction SilentlyContinue) {
-              Start-VM $VMName -ErrorAction SilentlyContinue
-          } else {
-              New-VM -Name $VMName -MemoryStartupBytes $Memory -Generation 2 -NewVHDPath $VHDPath -NewVHDSizeBytes $VHDSize
-              Set-VMProcessor $VMName -Count $CPU
-              Set-VMDvdDrive -VMName $VMName -Path $ISOPath
-              Start-VM $VMName
-              pwsh ./Easy-GPU-PV/Easy-GPU-PV.ps1 -VMName $VMName -ISOPath $ISOPath
-              Start-Sleep -Seconds 15
-          }
-      # -------------------------
-      # 2️⃣ Configure Core RDP Settings
-      # -------------------------
-      - name: Configure RDP
-        shell: powershell
-        run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
-          netsh advfirewall firewall delete rule name="RDP-Tailscale" -ErrorAction SilentlyContinue
-          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
-          Restart-Service -Name TermService -Force
-      # -------------------------
-      # 3️⃣ Create RDP User (Persistent Password)
-      # -------------------------
-      - name: Create RDP User
-        shell: powershell
-        run: |
-          if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
-              $securePass = ConvertTo-SecureString "@ayonij123" -AsPlainText -Force
-              New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
-              Add-LocalGroupMember -Group "Administrators" -Member "RDP"
-              Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
-          } else {
-              $securePass = ConvertTo-SecureString "@ayonij123" -AsPlainText -Force
-              $u = Get-LocalUser -Name "RDP"
-              $u | Set-LocalUser -Password $securePass
-          }
-          echo "RDP_CREDS=User: RDP | Password: @ayonij123" >> $env:GITHUB_ENV
-          echo "RDP_PASSWORD=@ayonij123" >> $env:GITHUB_ENV
-      # -------------------------
-      # 4️⃣ Install Tailscale (if not installed)
-      # -------------------------
-      - name: Install Tailscale
-        shell: powershell
-        run: |
-          if (-not (Test-Path "$env:ProgramFiles\Tailscale\tailscale.exe")) {
-              $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-              $installerPath = "$env:TEMP\tailscale.msi"
-              Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-              Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-              Remove-Item $installerPath -Force
-          }
-      # -------------------------
-      # 5️⃣ Connect Tailscale
-      # -------------------------
-      - name: Connect Tailscale
-        shell: powershell
-        run: |
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
-          $tsIP = $null
-          $retries = 0
-          while (-not $tsIP -and $retries -lt 12) {
-              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-              Start-Sleep -Seconds 5
-              $retries++
-          }
-          if (-not $tsIP) { Write-Error "Tailscale IP not assigned"; exit 1 }
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-          Write-Host "Tailscale IP: $tsIP"
-      # -------------------------
-      # 6️⃣ Verify RDP Connectivity
-      # -------------------------
-      - name: Verify RDP
-        shell: powershell
-        run: |
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) { Write-Error "TCP 3389 failed"; exit 1 }
-          Write-Host "TCP connectivity successful!"
-      # -------------------------
-      # 7️⃣ Install Microsoft Apps + Chrome + Roblox
-      # -------------------------
-      - name: Install Chrome & Roblox
-        shell: powershell
-        run: |
-          if (-not (Get-Command "chrome.exe" -ErrorAction SilentlyContinue)) {
-              Invoke-WebRequest "https://dl.google.com/chrome/install/latest/chrome_installer.exe" -OutFile "chrome_installer.exe"
-              Start-Process .\chrome_installer.exe -ArgumentList "/silent /install" -Wait
-          }
-          $RobloxPath = Join-Path $env:LOCALAPPDATA "Roblox"
-          if (-not (Test-Path $RobloxPath)) {
-              $RobloxInstaller = "https://setup.rbxcdn.com/latest/RobloxPlayerLauncher.exe"
-              Invoke-WebRequest $RobloxInstaller -OutFile "RobloxPlayerLauncher.exe"
-              Start-Process .\RobloxPlayerLauncher.exe -ArgumentList "/quiet /norestart" -Wait
-          }
-      # -------------------------
-      # 8️⃣ Install Parsec
-      # -------------------------
-      - name: Install Parsec Client & Auto-Start
-        shell: powershell
-        run: |
-          $parsecUrl = "https://builds.parsecgaming.com/parsec-windows.exe"
-          $installer = "parsec-installer.exe"
-          if (-not (Test-Path "$Env:ProgramFiles\Parsec\parsec.exe") -and -not (Test-Path "$Env:ProgramFiles(x86)\Parsec\parsec.exe")) {
-              Invoke-WebRequest $parsecUrl -OutFile $installer
-              Start-Process -FilePath ".\${installer}" -ArgumentList "/S" -Wait
-          }
-          $parsecExe = "$Env:ProgramFiles\Parsec\parsec.exe"
-          if (-not (Test-Path $parsecExe)) { $parsecExe = "$Env:ProgramFiles(x86)\Parsec\parsec.exe" }
-          if (Test-Path $parsecExe) {
-              $taskName = "ParsecAutoStart"
-              $action = New-ScheduledTaskAction -Execute $parsecExe -ArgumentList ""
-              $trigger = New-ScheduledTaskTrigger -AtLogOn
-              Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -User "RDP" -Password "@ayonij123" -RunLevel Highest -Force
-          }
-      # -------------------------
-      # 9️⃣ Force Roblox to Run (ignore VM check)
-      # -------------------------
-      - name: Force Roblox Run
-        shell: powershell
-        run: |
-          $RobloxPlayerExe = (Get-ChildItem -Path "$env:LOCALAPPDATA\Roblox" -Recurse -Filter "RobloxPlayerBeta.exe" -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
-          if ($RobloxPlayerExe) {
-              Start-Process -FilePath $RobloxPlayerExe -ArgumentList "" -WorkingDirectory (Split-Path $RobloxPlayerExe)
-          }
-    name: GPU RDP VM with Roblox and Parsec (persistent)
 
-on:
-  workflow_dispatch:
-
-jobs:
-  gpu-rdp-roblox:
-    runs-on: self-hosted
-    timeout-minutes: 20160  # ~14 days
-    steps:
-      - name: Checkout Repo
-        uses: actions/checkout@v3
-
-      # -------------------------
-      # 1️⃣ Setup Persistent VM with Hyper-V & GPU PV
-      # -------------------------
-      - name: Setup Persistent VM
+      - name: Setup VM
         shell: powershell
         run: |
           $VMName = "GPU-VM"
@@ -176,25 +21,25 @@ jobs:
           $CPU = 2
           $VHDSize = 200GB
 
-          # Enable Hyper-V
           dism.exe /Online /Enable-Feature:Microsoft-Hyper-V /All
 
-          # Create or start VM
           if (Get-VM -Name $VMName -ErrorAction SilentlyContinue) {
-              Start-VM $VMName -ErrorAction SilentlyContinue
-          } else {
-              New-VM -Name $VMName -MemoryStartupBytes $Memory -Generation 2 -NewVHDPath $VHDPath -NewVHDSizeBytes $VHDSize
-              Set-VMProcessor $VMName -Count $CPU
-              Set-VMDvdDrive -VMName $VMName -Path $ISOPath
-              Start-VM $VMName
-
-              pwsh ./Easy-GPU-PV/Easy-GPU-PV.ps1 -VMName $VMName -ISOPath $ISOPath
-              Start-Sleep -Seconds 15
+              Stop-VM -Name $VMName -Force -ErrorAction SilentlyContinue
+              Remove-VM -Name $VMName -Force -ErrorAction SilentlyContinue
+              Remove-Item -Path $VHDPath -Force -ErrorAction SilentlyContinue
           }
 
-      # -------------------------
-      # 2️⃣ Configure Core RDP Settings
-      # -------------------------
+          New-VM -Name $VMName -MemoryStartupBytes $Memory -Generation 2 -NewVHDPath $VHDPath -NewVHDSizeBytes $VHDSize
+          Set-VMProcessor -VMName $VMName -Count $CPU
+          Set-VMDvdDrive -VMName $VMName -Path $ISOPath
+          Start-VM -Name $VMName
+
+          if (Test-Path "./Easy-GPU-PV/Easy-GPU-PV.ps1") {
+              pwsh ./Easy-GPU-PV/Easy-GPU-PV.ps1 -VMName $VMName -ISOPath $ISOPath
+          }
+
+          Start-Sleep -Seconds 20
+
       - name: Configure RDP
         shell: powershell
         run: |
@@ -205,32 +50,25 @@ jobs:
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
 
-      # -------------------------
-      # 3️⃣ Create RDP User (Persistent Password)
-      # -------------------------
-      - name: Create RDP User
+      - name: Create RDP user
         shell: powershell
         run: |
+          $securePass = ConvertTo-SecureString "@ayonij123" -AsPlainText -Force
           if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
-              $securePass = ConvertTo-SecureString "@ayonij123" -AsPlainText -Force
               New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
               Add-LocalGroupMember -Group "Administrators" -Member "RDP"
               Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
           } else {
-              $securePass = ConvertTo-SecureString "@ayonij123" -AsPlainText -Force
-              $u = Get-LocalUser -Name "RDP"
-              $u | Set-LocalUser -Password $securePass
+              (Get-LocalUser -Name "RDP") | Set-LocalUser -Password $securePass
           }
           echo "RDP_CREDS=User: RDP | Password: @ayonij123" >> $env:GITHUB_ENV
           echo "RDP_PASSWORD=@ayonij123" >> $env:GITHUB_ENV
 
-      # -------------------------
-      # 4️⃣ Install Tailscale (if not installed)
-      # -------------------------
       - name: Install Tailscale
         shell: powershell
         run: |
-          if (-not (Test-Path "$env:ProgramFiles\Tailscale\tailscale.exe")) {
+          $tsPath = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          if (-not (Test-Path $tsPath)) {
               $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
               $installerPath = "$env:TEMP\tailscale.msi"
               Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
@@ -238,9 +76,6 @@ jobs:
               Remove-Item $installerPath -Force
           }
 
-      # -------------------------
-      # 5️⃣ Connect Tailscale
-      # -------------------------
       - name: Connect Tailscale
         shell: powershell
         run: |
@@ -256,81 +91,31 @@ jobs:
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
           Write-Host "Tailscale IP: $tsIP"
 
-      # -------------------------
-      # 6️⃣ Verify RDP Connectivity
-      # -------------------------
       - name: Verify RDP
         shell: powershell
         run: |
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) { Write-Error "TCP 3389 failed"; exit 1 }
-          Write-Host "TCP connectivity successful!"
+          $test = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $test.TcpTestSucceeded) { Write-Error "TCP 3389 failed"; exit 1 }
+          Write-Host "RDP reachable via Tailscale IP."
 
-      # -------------------------
-      # 7️⃣ Install Microsoft Apps + Chrome + Roblox
-      # -------------------------
-      - name: Install Chrome & Roblox
+      - name: Force-start Roblox if present
         shell: powershell
         run: |
-          if (-not (Get-Command "chrome.exe" -ErrorAction SilentlyContinue)) {
-              Invoke-WebRequest "https://dl.google.com/chrome/install/latest/chrome_installer.exe" -OutFile "chrome_installer.exe"
-              Start-Process .\chrome_installer.exe -ArgumentList "/silent /install" -Wait
-          }
-
-          $RobloxPath = Join-Path $env:LOCALAPPDATA "Roblox"
-          if (-not (Test-Path $RobloxPath)) {
-              $RobloxInstaller = "https://setup.rbxcdn.com/latest/RobloxPlayerLauncher.exe"
-              Invoke-WebRequest $RobloxInstaller -OutFile "RobloxPlayerLauncher.exe"
-              Start-Process .\RobloxPlayerLauncher.exe -ArgumentList "/quiet /norestart" -Wait
-          }
-
-      # -------------------------
-      # 8️⃣ Install Parsec
-      # -------------------------
-      - name: Install Parsec Client & Auto-Start
-        shell: powershell
-        run: |
-          $parsecUrl = "https://builds.parsecgaming.com/parsec-windows.exe"
-          $installer = "parsec-installer.exe"
-          if (-not (Test-Path "$Env:ProgramFiles\Parsec\parsec.exe") -and -not (Test-Path "$Env:ProgramFiles(x86)\Parsec\parsec.exe")) {
-              Invoke-WebRequest $parsecUrl -OutFile $installer
-              Start-Process -FilePath ".\${installer}" -ArgumentList "/S" -Wait
-          }
-
-          $parsecExe = "$Env:ProgramFiles\Parsec\parsec.exe"
-          if (-not (Test-Path $parsecExe)) { $parsecExe = "$Env:ProgramFiles(x86)\Parsec\parsec.exe" }
-
-          if (Test-Path $parsecExe) {
-              $taskName = "ParsecAutoStart"
-              $action = New-ScheduledTaskAction -Execute $parsecExe -ArgumentList ""
-              $trigger = New-ScheduledTaskTrigger -AtLogOn
-              Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -User "RDP" -Password "@ayonij123" -RunLevel Highest -Force
-          }
-
-      # -------------------------
-      # 9️⃣ Force Roblox to Run (ignore VM check)
-      # -------------------------
-      - name: Force Roblox Run
-        shell: powershell
-        run: |
-          $RobloxPlayerExe = (Get-ChildItem -Path "$env:LOCALAPPDATA\Roblox" -Recurse -Filter "RobloxPlayerBeta.exe" -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+          $RobloxPlayerExe = (Get-ChildItem -Path "$env:LOCALAPPDATA\Roblox" -Recurse -Filter "RobloxPlayerBeta.exe" -ErrorAction SilentlyContinue | Select-Object -First 1)
           if ($RobloxPlayerExe) {
-              Start-Process -FilePath $RobloxPlayerExe -ArgumentList "" -WorkingDirectory (Split-Path $RobloxPlayerExe)
+              Start-Process -FilePath $RobloxPlayerExe.FullName -WorkingDirectory (Split-Path $RobloxPlayerExe.FullName)
           }
 
-       # -------------------------
-      # 🔚 RDP Info & Maintain (keep job alive)
-      # -------------------------
-      - name: RDP Info & Maintain
+      - name: Keep job alive and show RDP info
         shell: powershell
         run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address (Tailscale): $env:TAILSCALE_IP"
+          Write-Host ""
+          Write-Host "=== RDP ACCESS ==="
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
           Write-Host "Username: RDP"
           Write-Host "Password: @ayonij123"
-          Write-Host "==================`n"
+          Write-Host "=================="
           while ($true) {
-              Write-Host "[$(Get-Date)] VM active - Ctrl+C to terminate"
-              Start-Sleep -Seconds 300
+              Write-Host "Job active at: $(Get-Date)"
+              Start-Sleep -Seconds 60
           }
-
