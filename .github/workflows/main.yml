@@ -6,12 +6,14 @@ on:
 jobs:
   gpu-rdp-roblox:
     runs-on: self-hosted
-    timeout-minutes: 20160
+    timeout-minutes: 20160  # ~14 days
     steps:
       - name: Checkout Repo
         uses: actions/checkout@v3
 
-      # 1. Setup Persistent VM with Hyper-V & GPU PV
+      # -------------------------
+      # 1️⃣ Setup Persistent VM with Hyper-V & GPU PV
+      # -------------------------
       - name: Setup Persistent VM
         shell: powershell
         run: |
@@ -22,46 +24,38 @@ jobs:
           $CPU = 2
           $VHDSize = 200GB
 
+          # Enable Hyper-V
           dism.exe /Online /Enable-Feature:Microsoft-Hyper-V /All
 
+          # Create or start VM
           if (Get-VM -Name $VMName -ErrorAction SilentlyContinue) {
-              Write-Host "VM exists. Starting VM..."
               Start-VM $VMName -ErrorAction SilentlyContinue
           } else {
-              Write-Host "VM does not exist. Creating VM..."
               New-VM -Name $VMName -MemoryStartupBytes $Memory -Generation 2 -NewVHDPath $VHDPath -NewVHDSizeBytes $VHDSize
               Set-VMProcessor $VMName -Count $CPU
               Set-VMDvdDrive -VMName $VMName -Path $ISOPath
               Start-VM $VMName
 
               pwsh ./Easy-GPU-PV/Easy-GPU-PV.ps1 -VMName $VMName -ISOPath $ISOPath
-
               Start-Sleep -Seconds 15
-
-              Write-Host "Attempting to install Chrome and Roblox on host (if desired)."
-              Invoke-WebRequest "https://dl.google.com/chrome/install/latest/chrome_installer.exe" -OutFile "chrome_installer.exe"
-              Start-Process .\chrome_installer.exe -ArgumentList "/silent /install" -Wait
-
-              $RobloxInstaller = "https://setup.rbxcdn.com/latest/RobloxPlayerLauncher.exe"
-              Invoke-WebRequest $RobloxInstaller -OutFile "RobloxPlayerLauncher.exe"
-              Start-Process .\RobloxPlayerLauncher.exe -ArgumentList "/quiet" -Wait
           }
 
-      # 2. Configure Core RDP Settings
+      # -------------------------
+      # 2️⃣ Configure Core RDP Settings
+      # -------------------------
       - name: Configure RDP
         shell: powershell
         run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-                             -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "SecurityLayer" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
           netsh advfirewall firewall delete rule name="RDP-Tailscale" -ErrorAction SilentlyContinue
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
 
-      # 3. Create RDP User (Persistent Password)
+      # -------------------------
+      # 3️⃣ Create RDP User (Persistent Password)
+      # -------------------------
       - name: Create RDP User
         shell: powershell
         run: |
@@ -78,7 +72,9 @@ jobs:
           echo "RDP_CREDS=User: RDP | Password: @ayonij123" >> $env:GITHUB_ENV
           echo "RDP_PASSWORD=@ayonij123" >> $env:GITHUB_ENV
 
-      # 4. Install Tailscale (if not installed)
+      # -------------------------
+      # 4️⃣ Install Tailscale (if not installed)
+      # -------------------------
       - name: Install Tailscale
         shell: powershell
         run: |
@@ -88,11 +84,11 @@ jobs:
               Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
               Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
               Remove-Item $installerPath -Force
-          } else {
-              Write-Host "Tailscale already installed."
           }
 
-      # 5. Connect Tailscale
+      # -------------------------
+      # 5️⃣ Connect Tailscale
+      # -------------------------
       - name: Connect Tailscale
         shell: powershell
         run: |
@@ -108,7 +104,9 @@ jobs:
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
           Write-Host "Tailscale IP: $tsIP"
 
-      # 6. Verify RDP Connectivity
+      # -------------------------
+      # 6️⃣ Verify RDP Connectivity
+      # -------------------------
       - name: Verify RDP
         shell: powershell
         run: |
@@ -116,32 +114,27 @@ jobs:
           if (-not $testResult.TcpTestSucceeded) { Write-Error "TCP 3389 failed"; exit 1 }
           Write-Host "TCP connectivity successful!"
 
-      # 7. Install Chrome on Host (if not installed)
-      - name: Install Chrome (host)
+      # -------------------------
+      # 7️⃣ Install Microsoft Apps + Chrome + Roblox
+      # -------------------------
+      - name: Install Chrome & Roblox
         shell: powershell
         run: |
           if (-not (Get-Command "chrome.exe" -ErrorAction SilentlyContinue)) {
               Invoke-WebRequest "https://dl.google.com/chrome/install/latest/chrome_installer.exe" -OutFile "chrome_installer.exe"
               Start-Process .\chrome_installer.exe -ArgumentList "/silent /install" -Wait
-          } else {
-              Write-Host "Chrome already installed on host."
           }
 
-      # 8. Install Roblox Player on Host (if not installed)
-      - name: Install Roblox (host)
-        shell: powershell
-        run: |
           $RobloxPath = Join-Path $env:LOCALAPPDATA "Roblox"
           if (-not (Test-Path $RobloxPath)) {
               $RobloxInstaller = "https://setup.rbxcdn.com/latest/RobloxPlayerLauncher.exe"
               Invoke-WebRequest $RobloxInstaller -OutFile "RobloxPlayerLauncher.exe"
-              Start-Process .\RobloxPlayerLauncher.exe -ArgumentList "/quiet" -Wait
-              Start-Sleep -Seconds 8
-          } else {
-              Write-Host "Roblox appears present on host."
+              Start-Process .\RobloxPlayerLauncher.exe -ArgumentList "/quiet /norestart" -Wait
           }
 
-      # 9. Parsec: install client + auto-start
+      # -------------------------
+      # 8️⃣ Install Parsec
+      # -------------------------
       - name: Install Parsec Client & Auto-Start
         shell: powershell
         run: |
@@ -150,104 +143,30 @@ jobs:
           if (-not (Test-Path "$Env:ProgramFiles\Parsec\parsec.exe") -and -not (Test-Path "$Env:ProgramFiles(x86)\Parsec\parsec.exe")) {
               Invoke-WebRequest $parsecUrl -OutFile $installer
               Start-Process -FilePath ".\${installer}" -ArgumentList "/S" -Wait
-          } else {
-              Write-Host "Parsec likely already installed."
           }
 
           $parsecExe = "$Env:ProgramFiles\Parsec\parsec.exe"
           if (-not (Test-Path $parsecExe)) { $parsecExe = "$Env:ProgramFiles(x86)\Parsec\parsec.exe" }
 
           if (Test-Path $parsecExe) {
-              Write-Host "Parsec installed at $parsecExe"
               $taskName = "ParsecAutoStart"
               $action = New-ScheduledTaskAction -Execute $parsecExe -ArgumentList ""
               $trigger = New-ScheduledTaskTrigger -AtLogOn
-              $ruser = "RDP"
-              $rpass = "@ayonij123"
-              Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -User $ruser -Password $rpass -RunLevel Highest -Force
-              Write-Host "Scheduled task $taskName created for $ruser"
-          } else {
-              Write-Warning "Parsec exe not found after install."
+              Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -User "RDP" -Password "@ayonij123" -RunLevel Highest -Force
           }
 
-      # Diagnostics: dxdiag, display info, BIOS, Roblox logs (upload artifact)
-      - name: Run dxdiag and collect system info
-        shell: powershell
-        run: |
-          $dx = "$env:RUNNER_TEMP\dxdiag.txt"
-          dxdiag /t $dx
-          Get-PnpDevice -Class Display | Out-File "$env:RUNNER_TEMP\display_devices.txt"
-          Get-WmiObject win32_bios | Format-List * > "$env:RUNNER_TEMP\bios.txt"
-          Get-WmiObject win32_computersystem | Format-List * > "$env:RUNNER_TEMP\system.txt"
-          reg query "HKLM\HARDWARE\DESCRIPTION\System" > "$env:RUNNER_TEMP\hwdesc.txt" 2>$null
-
-      - name: Collect latest Roblox logs
-        shell: powershell
-        run: |
-          $robloxLogs = "$env:LOCALAPPDATA\Roblox\logs"
-          $dest = "$env:RUNNER_TEMP\roblox-logs"
-          New-Item -Path $dest -ItemType Directory -Force | Out-Null
-          if (Test-Path $robloxLogs) {
-              Get-ChildItem -Path $robloxLogs -File | Sort-Object LastWriteTime -Descending | Select-Object -First 20 | ForEach-Object {
-                  Copy-Item $_.FullName -Destination $dest -Force
-              }
-          } else {
-              Write-Host "No Roblox logs folder found at $robloxLogs"
-          }
-
-      - name: Zip diagnostics
-        shell: powershell
-        run: |
-          $zipPath = "$env:RUNNER_TEMP\diagnostics.zip"
-          Remove-Item $zipPath -ErrorAction SilentlyContinue
-          $items = @("$env:RUNNER_TEMP\dxdiag.txt","$env:RUNNER_TEMP\display_devices.txt","$env:RUNNER_TEMP\bios.txt","$env:RUNNER_TEMP\system.txt","$env:RUNNER_TEMP\hwdesc.txt","$env:RUNNER_TEMP\roblox-logs\*")
-          Compress-Archive -Path $items -DestinationPath $zipPath -Force
-          echo "DIAG_ZIP=$zipPath" >> $env:GITHUB_ENV
-
-      - name: Upload diagnostics artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: roblox-diagnostics
-          path: ${{ env.DIAG_ZIP }}
-
-      # Robust Roblox auto-start inside host (attempts, logs)
-      - name: Robust Roblox Auto-Start (host)
+      # -------------------------
+      # 9️⃣ Force Roblox to Run (ignore VM check)
+      # -------------------------
+      - name: Force Roblox Run
         shell: powershell
         run: |
           $RobloxPlayerExe = (Get-ChildItem -Path "$env:LOCALAPPDATA\Roblox" -Recurse -Filter "RobloxPlayerBeta.exe" -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
           if ($RobloxPlayerExe) {
-              $launcherScript = "$env:ProgramData\Roblox\roblox-launcher-run.ps1"
-              $logFile = "$env:ProgramData\Roblox\autostart.log"
-              @"
-Start-Sleep -Seconds 10
-for (\$i=1; \$i -le 3; \$i++) {
-  try {
-    Start-Process -FilePath `"$RobloxPlayerExe`" -ArgumentList "" -ErrorAction Stop
-    Add-Content -Path `"$logFile`" -Value \"$(Get-Date) - Started Roblox on attempt \$i\"
-    break
-  } catch {
-    Add-Content -Path `"$logFile`" -Value \"$(Get-Date) - Failed attempt \$i: \$_\"
-    Start-Sleep -Seconds 5
-  }
-}
-"@ | Out-File -Encoding utf8 $launcherScript -Force
-
-          $taskName = "RobloxRobustAutoStart"
-          $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$launcherScript`""
-          $trigger = New-ScheduledTaskTrigger -AtLogOn
-          Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -User "RDP" -Password "@ayonij123" -RunLevel Highest -Force
-          Write-Host "Registered robust autostart task $taskName"
-
-      # RDP Info & Maintain (keep job alive)
-      - name: RDP Info & Maintain
-        shell: powershell
-        run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address (Tailscale): $env:TAILSCALE_IP"
-          Write-Host "Username: RDP"
-          Write-Host "Password: @ayonij123"
-          Write-Host "==================`n"
-          while ($true) {
-              Write-Host "[$(Get-Date)] VM active - Ctrl+C to terminate"
-              Start-Sleep -Seconds 300
+              Start-Process -FilePath $RobloxPlayerExe -ArgumentList "" -WorkingDirectory (Split-Path $RobloxPlayerExe)
           }
+
+      # -------------------------
+      # 🔚 RDP Info & Maintain (keep job alive)
+      # -------------------------
+      - name: R
