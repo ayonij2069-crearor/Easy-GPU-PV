@@ -5,7 +5,7 @@ on:
 
 jobs:
   gpu-rdp-roblox:
-    runs-on: self-hosted
+    runs-on: windows-latest
     timeout-minutes: 360
     steps:
       - name: Checkout Repo
@@ -53,7 +53,8 @@ jobs:
       - name: Create RDP user
         shell: powershell
         run: |
-          $securePass = ConvertTo-SecureString "@ayonij123" -AsPlainText -Force
+          $securePlain = "@ayonij123"
+          $securePass = ConvertTo-SecureString $securePlain -AsPlainText -Force
           if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
               New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
               Add-LocalGroupMember -Group "Administrators" -Member "RDP"
@@ -61,8 +62,8 @@ jobs:
           } else {
               (Get-LocalUser -Name "RDP") | Set-LocalUser -Password $securePass
           }
-          echo "RDP_CREDS=User: RDP | Password: @ayonij123" >> $env:GITHUB_ENV
-          echo "RDP_PASSWORD=@ayonij123" >> $env:GITHUB_ENV
+          echo "RDP_CREDS=User: RDP | Password: $securePlain" >> $env:GITHUB_ENV
+          echo "RDP_PASSWORD=$securePlain" >> $env:GITHUB_ENV
 
       - name: Install Tailscale
         shell: powershell
@@ -78,8 +79,10 @@ jobs:
 
       - name: Connect Tailscale
         shell: powershell
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$env:TAILSCALE_AUTH_KEY --hostname=gh-runner-$env:GITHUB_RUN_ID
           $tsIP = $null
           $retries = 0
           while (-not $tsIP -and $retries -lt 12) {
@@ -98,12 +101,96 @@ jobs:
           if (-not $test.TcpTestSucceeded) { Write-Error "TCP 3389 failed"; exit 1 }
           Write-Host "RDP reachable via Tailscale IP."
 
-      - name: Force-start Roblox if present
+      - name: Force-start Roblox (VM-aware, with fallback)
         shell: powershell
         run: |
-          $RobloxPlayerExe = (Get-ChildItem -Path "$env:LOCALAPPDATA\Roblox" -Recurse -Filter "RobloxPlayerBeta.exe" -ErrorAction SilentlyContinue | Select-Object -First 1)
-          if ($RobloxPlayerExe) {
-              Start-Process -FilePath $RobloxPlayerExe.FullName -WorkingDirectory (Split-Path $RobloxPlayerExe.FullName)
+          $VMName = "GPU-VM"
+          $robloxRelativePath = "$env:LOCALAPPDATA\Roblox"
+          $robloxExeFilter = "RobloxPlayerBeta.exe"
+          $hostAttempted = $false
+          $vmAttempted = $false
+
+          function Start-Roblox-Host {
+              Write-Host "Attempting to start Roblox on HOST..."
+              $hostAttempted = $true
+              $RobloxPlayerExe = Get-ChildItem -Path $robloxRelativePath -Recurse -Filter $robloxExeFilter -ErrorAction SilentlyContinue | Select-Object -First 1
+              if ($RobloxPlayerExe) {
+                  Start-Process -FilePath $RobloxPlayerExe.FullName -WorkingDirectory (Split-Path $RobloxPlayerExe.FullName) -WindowStyle Normal
+                  Write-Host "Started Roblox on host: $($RobloxPlayerExe.FullName)"
+                  return $true
+              } else {
+                  Write-Host "Roblox not found on host."
+                  return $false
+              }
+          }
+
+          function Start-Roblox-VM {
+              param($vmname, $username, $plainpass)
+              Write-Host "Attempting to start Roblox INSIDE VM '$vmname' using PowerShell Direct..."
+              $vmAttempted = $true
+
+              # create credential object from plain password (username will be 'RDP' by default)
+              $sec = ConvertTo-SecureString $plainpass -AsPlainText -Force
+              $cred = New-Object System.Management.Automation.PSCredential ($username, $sec)
+
+              $tries = 0
+              while ($tries -lt 12) {
+                  try {
+                      $vm = Get-VM -Name $vmname -ErrorAction Stop
+                      if ($vm.State -ne 'Running') {
+                          Write-Host "VM $vmname not running yet. Attempting to Start-VM..."
+                          Start-VM -Name $vmname -ErrorAction SilentlyContinue
+                          Start-Sleep -Seconds 5
+                          $tries++
+                          continue
+                      }
+
+                      # Use PowerShell Direct to run the command inside the VM
+                      Invoke-Command -VMName $vmname -Credential $cred -ScriptBlock {
+                          param($exeFilter)
+                          Write-Host "Searching for Roblox inside VM..."
+                          $rd = "$env:LOCALAPPDATA\Roblox"
+                          $r = Get-ChildItem -Path $rd -Recurse -Filter $exeFilter -ErrorAction SilentlyContinue | Select-Object -First 1
+                          if ($r) {
+                              Start-Process -FilePath $r.FullName -WorkingDirectory (Split-Path $r.FullName) -WindowStyle Normal
+                              Write-Output "OK: Started Roblox: $($r.FullName)"
+                          } else {
+                              Write-Output "MISSING: Roblox not found in VM"
+                          }
+                      } -ArgumentList $robloxExeFilter -ErrorAction Stop -Verbose | ForEach-Object { Write-Host $_ }
+                      return $true
+                  } catch {
+                      Write-Host "PowerShell Direct attempt failed: $($_.Exception.Message)"
+                      Start-Sleep -Seconds 5
+                      $tries++
+                  }
+              }
+
+              Write-Host "Exceeded attempts to start Roblox inside VM."
+              return $false
+          }
+
+          # Try VM first if VM exists
+          $vmexists = $false
+          try {
+              $vm = Get-VM -Name $VMName -ErrorAction Stop
+              $vmexists = $true
+          } catch {
+              $vmexists = $false
+          }
+
+          if ($vmexists) {
+              Write-Host "VM $VMName detected. Will attempt in-VM start."
+              $startedInVm = Start-Roblox-VM -vmname $VMName -username "RDP" -plainpass "@ayonij123"
+              if ($startedInVm) {
+                  Write-Host "Roblox started inside VM."
+              } else {
+                  Write-Host "Failed to start inside VM; falling back to host."
+                  if (Start-Roblox-Host) { Write-Host "Roblox started on host after VM failure." } else { Write-Host "Roblox not present on host either." }
+              }
+          } else {
+              Write-Host "No VM detected. Attempting to start on host."
+              if (Start-Roblox-Host) { Write-Host "Roblox started on host." } else { Write-Host "Roblox not present on host." }
           }
 
       - name: Keep job alive and show RDP info
