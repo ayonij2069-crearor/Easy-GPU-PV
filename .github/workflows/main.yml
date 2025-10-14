@@ -34,11 +34,49 @@ jobs:
           Set-VMDvdDrive -VMName $VMName -Path $ISOPath
           Start-VM -Name $VMName
 
-          if (Test-Path "./Easy-GPU-PV/Easy-GPU-PV.ps1") {
-              pwsh ./Easy-GPU-PV/Easy-GPU-PV.ps1 -VMName $VMName -ISOPath $ISOPath
+          Start-Sleep -Seconds 20
+
+      - name: Copy GPU Files to VM
+        shell: powershell
+        run: |
+          $VMName = "GPU-VM"
+          $GPUName = "AUTO"
+          $Hostname = $env:COMPUTERNAME
+
+          Import-Module "./Easy-GPU-PV/Add-VMGpuPartitionAdapterFiles.psm1"
+
+          $VM = Get-VM -VMName $VMName
+          $VHD = Get-VHD -VMId $VM.VMId
+
+          if ($VM.State -eq "Running") {
+              [bool]$state_was_running = $true
           }
 
-          Start-Sleep -Seconds 20
+          if ($VM.State -ne "Off") {
+              Write-Host "Attempting to shutdown VM..."
+              Stop-VM -Name $VMName -Force
+          }
+
+          while ($VM.State -ne "Off") {
+              Start-Sleep -Seconds 3
+              Write-Host "Waiting for VM to shutdown..."
+          }
+
+          Write-Host "Mounting VHD..."
+          $DriveLetter = (Mount-VHD -Path $VHD.Path -PassThru | Get-Disk | Get-Partition | Get-Volume | Where-Object {$_.DriveLetter} | ForEach-Object DriveLetter)
+
+          Write-Host "Copying GPU files..."
+          Add-VMGpuPartitionAdapterFiles -Hostname $Hostname -DriveLetter $DriveLetter -GPUName $GPUName
+
+          Write-Host "Dismounting VHD..."
+          Dismount-VHD -Path $VHD.Path
+
+          if ($state_was_running) {
+              Write-Host "VM was running before; starting VM..."
+              Start-VM $VMName
+          }
+
+          Write-Host "GPU file copy done."
 
       - name: Configure RDP
         shell: powershell
@@ -107,12 +145,9 @@ jobs:
           $VMName = "GPU-VM"
           $robloxRelativePath = "$env:LOCALAPPDATA\Roblox"
           $robloxExeFilter = "RobloxPlayerBeta.exe"
-          $hostAttempted = $false
-          $vmAttempted = $false
 
           function Start-Roblox-Host {
               Write-Host "Attempting to start Roblox on HOST..."
-              $hostAttempted = $true
               $RobloxPlayerExe = Get-ChildItem -Path $robloxRelativePath -Recurse -Filter $robloxExeFilter -ErrorAction SilentlyContinue | Select-Object -First 1
               if ($RobloxPlayerExe) {
                   Start-Process -FilePath $RobloxPlayerExe.FullName -WorkingDirectory (Split-Path $RobloxPlayerExe.FullName) -WindowStyle Normal
@@ -126,10 +161,7 @@ jobs:
 
           function Start-Roblox-VM {
               param($vmname, $username, $plainpass)
-              Write-Host "Attempting to start Roblox INSIDE VM '$vmname' using PowerShell Direct..."
-              $vmAttempted = $true
-
-              # create credential object from plain password (username will be 'RDP' by default)
+              Write-Host "Attempting to start Roblox INSIDE VM '$vmname'..."
               $sec = ConvertTo-SecureString $plainpass -AsPlainText -Force
               $cred = New-Object System.Management.Automation.PSCredential ($username, $sec)
 
@@ -138,17 +170,13 @@ jobs:
                   try {
                       $vm = Get-VM -Name $vmname -ErrorAction Stop
                       if ($vm.State -ne 'Running') {
-                          Write-Host "VM $vmname not running yet. Attempting to Start-VM..."
                           Start-VM -Name $vmname -ErrorAction SilentlyContinue
                           Start-Sleep -Seconds 5
                           $tries++
                           continue
                       }
-
-                      # Use PowerShell Direct to run the command inside the VM
                       Invoke-Command -VMName $vmname -Credential $cred -ScriptBlock {
                           param($exeFilter)
-                          Write-Host "Searching for Roblox inside VM..."
                           $rd = "$env:LOCALAPPDATA\Roblox"
                           $r = Get-ChildItem -Path $rd -Recurse -Filter $exeFilter -ErrorAction SilentlyContinue | Select-Object -First 1
                           if ($r) {
@@ -157,40 +185,25 @@ jobs:
                           } else {
                               Write-Output "MISSING: Roblox not found in VM"
                           }
-                      } -ArgumentList $robloxExeFilter -ErrorAction Stop -Verbose | ForEach-Object { Write-Host $_ }
+                      } -ArgumentList $robloxExeFilter -ErrorAction Stop | ForEach-Object { Write-Host $_ }
                       return $true
                   } catch {
-                      Write-Host "PowerShell Direct attempt failed: $($_.Exception.Message)"
                       Start-Sleep -Seconds 5
                       $tries++
                   }
               }
-
               Write-Host "Exceeded attempts to start Roblox inside VM."
               return $false
           }
 
-          # Try VM first if VM exists
           $vmexists = $false
-          try {
-              $vm = Get-VM -Name $VMName -ErrorAction Stop
-              $vmexists = $true
-          } catch {
-              $vmexists = $false
-          }
+          try { $vm = Get-VM -Name $VMName -ErrorAction Stop; $vmexists = $true } catch { $vmexists = $false }
 
           if ($vmexists) {
-              Write-Host "VM $VMName detected. Will attempt in-VM start."
               $startedInVm = Start-Roblox-VM -vmname $VMName -username "RDP" -plainpass "@ayonij123"
-              if ($startedInVm) {
-                  Write-Host "Roblox started inside VM."
-              } else {
-                  Write-Host "Failed to start inside VM; falling back to host."
-                  if (Start-Roblox-Host) { Write-Host "Roblox started on host after VM failure." } else { Write-Host "Roblox not present on host either." }
-              }
+              if (-not $startedInVm) { Start-Roblox-Host | Out-Null }
           } else {
-              Write-Host "No VM detected. Attempting to start on host."
-              if (Start-Roblox-Host) { Write-Host "Roblox started on host." } else { Write-Host "Roblox not present on host." }
+              Start-Roblox-Host | Out-Null
           }
 
       - name: Keep job alive and show RDP info
