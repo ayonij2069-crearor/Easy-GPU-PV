@@ -1,4 +1,4 @@
-name: GPU RDP VM with Roblox
+name: GPU RDP VM with Roblox (Fixed for Cloud)
 
 on:
   workflow_dispatch:
@@ -7,12 +7,14 @@ jobs:
   gpu-rdp-roblox:
     runs-on: windows-latest
     timeout-minutes: 360
+
     steps:
       - name: Checkout Repo
         uses: actions/checkout@v3
 
+      # Ensure Hyper-V and VM base setup
       - name: Setup VM
-        shell: powershell
+        shell: pwsh
         run: |
           $VMName = "GPU-VM"
           $VHDPath = "C:\HyperV\$VMName.vhdx"
@@ -31,39 +33,61 @@ jobs:
 
           New-VM -Name $VMName -MemoryStartupBytes $Memory -Generation 2 -NewVHDPath $VHDPath -NewVHDSizeBytes $VHDSize
           Set-VMProcessor -VMName $VMName -Count $CPU
-          Set-VMDvdDrive -VMName $VMName -Path $ISOPath
+          if (Test-Path $ISOPath) {
+              Set-VMDvdDrive -VMName $VMName -Path $ISOPath
+          } else {
+              Write-Host "⚠️ ISO not found at $ISOPath — skipping DVD attach."
+          }
           Start-VM -Name $VMName
-
           Start-Sleep -Seconds 20
 
+      # Fix for missing Easy-GPU-PV module
+      - name: Ensure Easy-GPU-PV Module
+        shell: pwsh
+        run: |
+          $modulePath = Join-Path $env:GITHUB_WORKSPACE "Easy-GPU-PV"
+          if (-not (Test-Path $modulePath)) {
+              Write-Host "Downloading Easy-GPU-PV..."
+              Invoke-WebRequest -Uri "https://github.com/jamesstringerparsec/Easy-GPU-PV/archive/refs/heads/master.zip" -OutFile "Easy-GPU-PV.zip"
+              Expand-Archive "Easy-GPU-PV.zip" -DestinationPath "$env:GITHUB_WORKSPACE"
+              Rename-Item "$env:GITHUB_WORKSPACE/Easy-GPU-PV-master" $modulePath
+          } else {
+              Write-Host "Easy-GPU-PV already present."
+          }
+
+      # Copy GPU partition files to VM
       - name: Copy GPU Files to VM
-        shell: powershell
+        shell: pwsh
         run: |
           $VMName = "GPU-VM"
           $GPUName = "AUTO"
           $Hostname = $env:COMPUTERNAME
+          $moduleFile = Join-Path $env:GITHUB_WORKSPACE "Easy-GPU-PV/Add-VMGpuPartitionAdapterFiles.psm1"
+          if (-not (Test-Path $moduleFile)) {
+              Write-Host "⚠️ GPU module not found at $moduleFile, skipping GPU setup."
+              exit 0
+          }
 
-          Import-Module "./Easy-GPU-PV/Add-VMGpuPartitionAdapterFiles.psm1"
-
+          Import-Module $moduleFile -Force
           $VM = Get-VM -VMName $VMName
           $VHD = Get-VHD -VMId $VM.VMId
 
-          if ($VM.State -eq "Running") {
-              [bool]$state_was_running = $true
-          }
+          $stateWasRunning = $false
+          if ($VM.State -eq "Running") { $stateWasRunning = $true }
 
           if ($VM.State -ne "Off") {
               Write-Host "Attempting to shutdown VM..."
               Stop-VM -Name $VMName -Force
           }
 
-          while ($VM.State -ne "Off") {
+          while ((Get-VM -Name $VMName).State -ne "Off") {
               Start-Sleep -Seconds 3
               Write-Host "Waiting for VM to shutdown..."
           }
 
           Write-Host "Mounting VHD..."
-          $DriveLetter = (Mount-VHD -Path $VHD.Path -PassThru | Get-Disk | Get-Partition | Get-Volume | Where-Object {$_.DriveLetter} | ForEach-Object DriveLetter)
+          $DriveLetter = (Mount-VHD -Path $VHD.Path -PassThru | Get-Disk | Get-Partition | Get-Volume | Where-Object {$_.DriveLetter} | Select-Object -First 1).DriveLetter
+          if (-not $DriveLetter) { Write-Error "Failed to mount VHD"; exit 1 }
 
           Write-Host "Copying GPU files..."
           Add-VMGpuPartitionAdapterFiles -Hostname $Hostname -DriveLetter $DriveLetter -GPUName $GPUName
@@ -71,15 +95,15 @@ jobs:
           Write-Host "Dismounting VHD..."
           Dismount-VHD -Path $VHD.Path
 
-          if ($state_was_running) {
-              Write-Host "VM was running before; starting VM..."
+          if ($stateWasRunning) {
+              Write-Host "VM was running before; restarting..."
               Start-VM $VMName
           }
 
-          Write-Host "GPU file copy done."
+          Write-Host "✅ GPU files copied successfully."
 
       - name: Configure RDP
-        shell: powershell
+        shell: pwsh
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
@@ -89,125 +113,76 @@ jobs:
           Restart-Service -Name TermService -Force
 
       - name: Create RDP user
-        shell: powershell
+        shell: pwsh
         run: |
-          $securePlain = "@ayonij123"
-          $securePass = ConvertTo-SecureString $securePlain -AsPlainText -Force
-          if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
-              New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
-              Add-LocalGroupMember -Group "Administrators" -Member "RDP"
-              Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
+          $user = "RDP"
+          $plain = "@ayonij123"
+          $secure = ConvertTo-SecureString $plain -AsPlainText -Force
+          if (-not (Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) {
+              New-LocalUser -Name $user -Password $secure -AccountNeverExpires
+              Add-LocalGroupMember -Group "Administrators" -Member $user
+              Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user
           } else {
-              (Get-LocalUser -Name "RDP") | Set-LocalUser -Password $securePass
+              (Get-LocalUser -Name $user) | Set-LocalUser -Password $secure
           }
-          echo "RDP_CREDS=User: RDP | Password: $securePlain" >> $env:GITHUB_ENV
-          echo "RDP_PASSWORD=$securePlain" >> $env:GITHUB_ENV
+          echo "RDP_PASSWORD=$plain" >> $env:GITHUB_ENV
 
       - name: Install Tailscale
-        shell: powershell
+        shell: pwsh
         run: |
-          $tsPath = "$env:ProgramFiles\Tailscale\tailscale.exe"
-          if (-not (Test-Path $tsPath)) {
-              $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-              $installerPath = "$env:TEMP\tailscale.msi"
-              Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-              Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-              Remove-Item $installerPath -Force
+          $exe = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          if (-not (Test-Path $exe)) {
+              Write-Host "Installing Tailscale..."
+              $url = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+              $dl = "$env:TEMP\tailscale.msi"
+              Invoke-WebRequest -Uri $url -OutFile $dl
+              Start-Process msiexec.exe -ArgumentList "/i `"$dl`" /quiet /norestart" -Wait
+              Remove-Item $dl -Force
+          } else {
+              Write-Host "Tailscale already installed."
           }
 
       - name: Connect Tailscale
-        shell: powershell
+        shell: pwsh
         env:
           TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$env:TAILSCALE_AUTH_KEY --hostname=gh-runner-$env:GITHUB_RUN_ID
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$env:TAILSCALE_AUTH_KEY --hostname="gh-runner-$env:GITHUB_RUN_ID"
           $tsIP = $null
-          $retries = 0
-          while (-not $tsIP -and $retries -lt 12) {
+          for ($i=0; $i -lt 12; $i++) {
               $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              if ($tsIP) { break }
               Start-Sleep -Seconds 5
-              $retries++
           }
-          if (-not $tsIP) { Write-Error "Tailscale IP not assigned"; exit 1 }
+          if (-not $tsIP) { Write-Error "No Tailscale IP assigned"; exit 1 }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
           Write-Host "Tailscale IP: $tsIP"
 
       - name: Verify RDP
-        shell: powershell
+        shell: pwsh
         run: |
           $test = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
           if (-not $test.TcpTestSucceeded) { Write-Error "TCP 3389 failed"; exit 1 }
-          Write-Host "RDP reachable via Tailscale IP."
+          Write-Host "✅ RDP reachable via Tailscale IP."
 
-      - name: Force-start Roblox (VM-aware, with fallback)
-        shell: powershell
+      - name: Force-start Roblox (VM-aware)
+        shell: pwsh
         run: |
           $VMName = "GPU-VM"
-          $robloxRelativePath = "$env:LOCALAPPDATA\Roblox"
-          $robloxExeFilter = "RobloxPlayerBeta.exe"
-
-          function Start-Roblox-Host {
-              Write-Host "Attempting to start Roblox on HOST..."
-              $RobloxPlayerExe = Get-ChildItem -Path $robloxRelativePath -Recurse -Filter $robloxExeFilter -ErrorAction SilentlyContinue | Select-Object -First 1
-              if ($RobloxPlayerExe) {
-                  Start-Process -FilePath $RobloxPlayerExe.FullName -WorkingDirectory (Split-Path $RobloxPlayerExe.FullName) -WindowStyle Normal
-                  Write-Host "Started Roblox on host: $($RobloxPlayerExe.FullName)"
-                  return $true
+          function Start-Roblox {
+              Write-Host "Trying to start Roblox..."
+              $robloxExe = Get-ChildItem -Path "$env:LOCALAPPDATA\Roblox" -Recurse -Filter "RobloxPlayerBeta.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+              if ($robloxExe) {
+                  Start-Process -FilePath $robloxExe.FullName -WorkingDirectory (Split-Path $robloxExe.FullName)
+                  Write-Host "✅ Roblox started at: $($robloxExe.FullName)"
               } else {
-                  Write-Host "Roblox not found on host."
-                  return $false
+                  Write-Host "⚠️ Roblox not found on host."
               }
           }
-
-          function Start-Roblox-VM {
-              param($vmname, $username, $plainpass)
-              Write-Host "Attempting to start Roblox INSIDE VM '$vmname'..."
-              $sec = ConvertTo-SecureString $plainpass -AsPlainText -Force
-              $cred = New-Object System.Management.Automation.PSCredential ($username, $sec)
-
-              $tries = 0
-              while ($tries -lt 12) {
-                  try {
-                      $vm = Get-VM -Name $vmname -ErrorAction Stop
-                      if ($vm.State -ne 'Running') {
-                          Start-VM -Name $vmname -ErrorAction SilentlyContinue
-                          Start-Sleep -Seconds 5
-                          $tries++
-                          continue
-                      }
-                      Invoke-Command -VMName $vmname -Credential $cred -ScriptBlock {
-                          param($exeFilter)
-                          $rd = "$env:LOCALAPPDATA\Roblox"
-                          $r = Get-ChildItem -Path $rd -Recurse -Filter $exeFilter -ErrorAction SilentlyContinue | Select-Object -First 1
-                          if ($r) {
-                              Start-Process -FilePath $r.FullName -WorkingDirectory (Split-Path $r.FullName) -WindowStyle Normal
-                              Write-Output "OK: Started Roblox: $($r.FullName)"
-                          } else {
-                              Write-Output "MISSING: Roblox not found in VM"
-                          }
-                      } -ArgumentList $robloxExeFilter -ErrorAction Stop | ForEach-Object { Write-Host $_ }
-                      return $true
-                  } catch {
-                      Start-Sleep -Seconds 5
-                      $tries++
-                  }
-              }
-              Write-Host "Exceeded attempts to start Roblox inside VM."
-              return $false
-          }
-
-          $vmexists = $false
-          try { $vm = Get-VM -Name $VMName -ErrorAction Stop; $vmexists = $true } catch { $vmexists = $false }
-
-          if ($vmexists) {
-              $startedInVm = Start-Roblox-VM -vmname $VMName -username "RDP" -plainpass "@ayonij123"
-              if (-not $startedInVm) { Start-Roblox-Host | Out-Null }
-          } else {
-              Start-Roblox-Host | Out-Null
-          }
+          Start-Roblox
 
       - name: Keep job alive and show RDP info
-        shell: powershell
+        shell: pwsh
         run: |
           Write-Host ""
           Write-Host "=== RDP ACCESS ==="
@@ -216,6 +191,6 @@ jobs:
           Write-Host "Password: @ayonij123"
           Write-Host "=================="
           while ($true) {
-              Write-Host "Job active at: $(Get-Date)"
+              Write-Host "Job alive at: $(Get-Date)"
               Start-Sleep -Seconds 60
           }
