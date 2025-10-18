@@ -1,10 +1,10 @@
-name: GPU Windows VM Setup
+name: Windows VM Setup (No GPU Passthrough)
 
 on:
   workflow_dispatch:
 
 jobs:
-  setup-gpu-vm:
+  setup-windows-vm:
     runs-on: windows-latest
     timeout-minutes: 360
 
@@ -15,82 +15,56 @@ jobs:
       - name: Set up PowerShell
         shell: pwsh
         run: |
-          Write-Host "PowerShell environment ready."
+          Write-Host "✅ PowerShell environment ready."
           Write-Host "Working Directory: $env:GITHUB_WORKSPACE"
 
       - name: Create VM
         shell: pwsh
         run: |
-          Write-Host "Creating GPU VM..."
-          $VMName = "GPU-VM"
-          New-VM -Name $VMName -MemoryStartupBytes 4GB -Generation 2 -NewVHDPath "$env:GITHUB_WORKSPACE\$VMName.vhdx" -NewVHDSizeBytes 60GB
-          Set-VMProcessor -VMName $VMName -Count 4
-          Write-Host "✅ VM created successfully."
+          Write-Host "🖥️ Creating standard Windows VM..."
+          $VMName = "Windows-VM"
+          $VHDPath = "$env:GITHUB_WORKSPACE\$VMName.vhdx"
 
-      - name: Copy GPU Files to VM
+          # Create new VM with 4GB RAM and 4 cores
+          New-VM -Name $VMName -MemoryStartupBytes 4GB -Generation 2 -NewVHDPath $VHDPath -NewVHDSizeBytes 60GB
+          Set-VMProcessor -VMName $VMName -Count 4
+
+          Write-Host "✅ VM created successfully at $VHDPath"
+
+      - name: Configure VM Settings
         shell: pwsh
         run: |
-          $VMName = "GPU-VM"
-          $GPUName = "AUTO"
-          $Hostname = $env:COMPUTERNAME
-          $TargetDir = Join-Path $env:GITHUB_WORKSPACE "Easy-GPU-PV"
-          $ModulePath = Join-Path $TargetDir "Add-VMGpuPartitionAdapterFiles.psm1"
+          $VMName = "Windows-VM"
+          Write-Host "⚙️ Configuring VM settings..."
+          Set-VM -Name $VMName -AutomaticStartAction StartIfRunning -AutomaticStopAction Save
+          Write-Host "✅ Configuration applied."
 
-          Write-Host "Working directory: $env:GITHUB_WORKSPACE"
-
-          # --- FIX: Clone the Easy-GPU-PV repo into workspace ---
-          if (-not (Test-Path $TargetDir)) {
-              Write-Host "Cloning Easy-GPU-PV repo into workspace..."
-              git clone https://github.com/jamesstringerparsec/Easy-GPU-PV.git $TargetDir
-          } else {
-              Write-Host "Easy-GPU-PV already exists."
-          }
-
-          # --- Verify module file exists ---
-          if (-not (Test-Path $ModulePath)) {
-              Write-Error "❌ GPU module not found at $ModulePath"
-              Write-Host "Contents of Easy-GPU-PV folder:"
-              Get-ChildItem -Path $TargetDir -Recurse | Select-Object FullName
-              exit 1
-          }
-
-          # --- Import module safely ---
-          Write-Host "✅ Importing module from: $ModulePath"
-          Import-Module $ModulePath -Force
-
-          # --- Proceed with GPU partition setup ---
+      - name: Prepare VHD
+        shell: pwsh
+        run: |
+          $VMName = "Windows-VM"
           $VM = Get-VM -VMName $VMName
           $VHD = Get-VHD -VMId $VM.VMId
-          $state_was_running = $false
-          if ($VM.State -eq "Running") { $state_was_running = $true }
 
-          if ($VM.State -ne "Off") {
-              Write-Host "Attempting to shutdown VM..."
-              Stop-VM -Name $VMName -Force
+          Write-Host "📂 Mounting VHD to verify..."
+          try {
+              $Volume = Mount-VHD -Path $VHD.Path -PassThru | Get-Disk | Get-Partition | Get-Volume | Where-Object {$_.DriveLetter} | Select-Object -First 1
+              Write-Host "✅ Mounted successfully at drive letter: $($Volume.DriveLetter)"
+          } catch {
+              Write-Host "⚠️ VHD mount skipped or failed: $($_.Exception.Message)"
           }
 
-          while ((Get-VM -Name $VMName).State -ne "Off") {
-              Start-Sleep -Seconds 3
-              Write-Host "Waiting for VM to shutdown..."
-          }
+          Write-Host "🔹 Dismounting VHD..."
+          Dismount-VHD -Path $VHD.Path -ErrorAction SilentlyContinue
 
-          Write-Host "Mounting VHD..."
-          $DriveLetter = (Mount-VHD -Path $VHD.Path -PassThru | Get-Disk | Get-Partition | Get-Volume | Where-Object {$_.DriveLetter} | Select-Object -First 1).DriveLetter
-          
-          Write-Host "Copying GPU files..."
-          Add-VMGpuPartitionAdapterFiles -Hostname $Hostname -DriveLetter $DriveLetter -GPUName $GPUName
-          
-          Write-Host "Dismounting VHD..."
-          Dismount-VHD -Path $VHD.Path
-
-          if ($state_was_running) {
-              Write-Host "VM was running before; starting VM..."
-              Start-VM $VMName
-          }
-
-          Write-Host "✅ GPU file copy done."
-
-      - name: Final confirmation
+      - name: Start VM
         shell: pwsh
         run: |
-          Write-Host "🎉 Workflow completed successfully!"
+          Write-Host "🚀 Starting the VM..."
+          Start-VM -Name "Windows-VM"
+          Write-Host "✅ VM started successfully."
+
+      - name: Final Confirmation
+        shell: pwsh
+        run: |
+          Write-Host "🎉 Windows VM setup completed successfully!"
