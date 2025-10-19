@@ -1,4 +1,4 @@
-name: GPU Windows VM Setup (with RDP & Tailscale)
+name: GPU Windows VM Setup (with RDP, Tailscale & Roblox)
 
 on:
   workflow_dispatch:
@@ -71,6 +71,139 @@ jobs:
           echo "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV
           Write-Host "✅ Connected to Tailscale with IP: $ip"
 
+      - name: Write Roblox installer & runner script to disk
+        shell: pwsh
+        run: |
+          $scriptDir = Join-Path $env:GITHUB_WORKSPACE ".github\scripts"
+          if (-not (Test-Path $scriptDir)) { New-Item -ItemType Directory -Path $scriptDir -Force | Out-Null }
+          $scriptPath = Join-Path $scriptDir "install-and-run-roblox.ps1"
+
+          @'
+# install-and-run-roblox.ps1
+# Downloads Roblox installer, installs it, and attempts to start RobloxPlayerBeta.exe.
+# Writes a log to $env:TEMP\roblox-install-log.txt
+
+$logPath = Join-Path $env:TEMP "roblox-install-log.txt"
+function Log { param($m) $timestamp = (Get-Date).ToString("u"); "$timestamp`t$m" | Out-File -FilePath $logPath -Append -Encoding utf8 }
+
+try {
+    Remove-Item -Path $logPath -ErrorAction SilentlyContinue
+    Log "Script start."
+
+    # Step 1 — Download the official Roblox installer
+    $installerUrl = "https://setup.rbxcdn.com/RobloxPlayerLauncher.exe"
+    $installerPath = Join-Path $env:TEMP "RobloxPlayerLauncher.exe"
+    Log "Downloading Roblox installer to $installerPath ..."
+    Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath -UseBasicParsing -ErrorAction Stop
+    Log "Download complete."
+
+    # Step 2 — Run the installer silently (installer handles interactive parts)
+    Log "Running installer..."
+    $proc = Start-Process -FilePath $installerPath -ArgumentList "/install" -PassThru -WindowStyle Hidden
+    $proc | Wait-Process -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 5
+    Log "Installer process finished."
+
+    # Step 3 — locate Roblox executable (search common install paths)
+    function Find-RobloxExe {
+        $candidates = @()
+        $candidates += Get-ChildItem -Path "$env:LOCALAPPDATA\Roblox" -Recurse -Filter "RobloxPlayerBeta.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+        $candidates += Get-ChildItem -Path "$env:PROGRAMFILES*" -Recurse -Filter "RobloxPlayerBeta.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+        $candidates += Get-ChildItem -Path "$env:PROGRAMFILES(X86)*" -Recurse -Filter "RobloxPlayerBeta.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+        return $candidates | Where-Object { $_ } | Select-Object -First 1
+    }
+
+    $tries = 0
+    $robloxExe = $null
+    while (-not $robloxExe -and $tries -lt 12) {
+        $tries++
+        Log "Searching for Roblox executable (attempt $tries)..."
+        $robloxExe = Find-RobloxExe
+        if ($robloxExe) { break }
+        Start-Sleep -Seconds 5
+    }
+
+    if (-not $robloxExe) {
+        Log "ERROR: Could not find RobloxPlayerBeta.exe after installation."
+        throw "Roblox executable not found."
+    }
+
+    $exePath = $robloxExe.FullName
+    Log "Found Roblox executable at: $exePath"
+
+    # Step 4 — Force start Roblox: kill any existing Roblox processes and restart
+    function Force-Start-Roblox {
+        param($exe)
+        $running = Get-Process -Name "RobloxPlayerBeta" -ErrorAction SilentlyContinue
+        if ($running) {
+            foreach ($p in $running) {
+                try { $p.Kill(); Log "Killed existing Roblox process Id=$($p.Id)." } catch { Log "Warning: could not kill process Id=$($p.Id): $($_.Exception.Message)" }
+            }
+            Start-Sleep -Seconds 2
+        }
+
+        try {
+            $startInfo = Start-Process -FilePath $exe -ArgumentList "" -PassThru -WorkingDirectory (Split-Path $exe)
+            Log "Started Roblox process Id=$($startInfo.Id)."
+            return $true
+        } catch {
+            Log "Failed to start Roblox: $($_.Exception.Message)"
+            return $false
+        }
+    }
+
+    $started = $false
+    $tries = 0
+    while (-not $started -and $tries -lt 6) {
+        $tries++
+        Log "Attempting to start Roblox (try $tries)..."
+        $started = Force-Start-Roblox -exe $exePath
+        if (-not $started) { Start-Sleep -Seconds 5 }
+    }
+
+    if (-not $started) {
+        Log "ERROR: Could not start Roblox after multiple attempts."
+        throw "Roblox start failed."
+    }
+
+    Start-Sleep -Seconds 5
+    $procCheck = Get-Process -Name "RobloxPlayerBeta" -ErrorAction SilentlyContinue
+    if ($procCheck) {
+        Log "Roblox is running. PID(s): $($procCheck | ForEach-Object { $_.Id } -join ', ')"
+    } else {
+        Log "ERROR: Roblox process not found after start."
+        throw "Roblox not running."
+    }
+
+    Log "Script completed successfully."
+    Write-Output "OK"
+} catch {
+    Log "EXCEPTION: $($_.Exception.Message)"
+    Write-Output "FAIL: $($_.Exception.Message)"
+    exit 1
+}
+'@ | Out-File -FilePath $scriptPath -Encoding utf8 -Force
+
+          Write-Host "Wrote script to $scriptPath"
+          Write-Host "Contents:"
+          Get-Content $scriptPath | Select-Object -First 20 | ForEach-Object { Write-Host $_ }
+
+      - name: Run Roblox installer + force-run script
+        shell: pwsh
+        run: |
+          $scriptPath = Join-Path $env:GITHUB_WORKSPACE ".github\scripts\install-and-run-roblox.ps1"
+          if (-not (Test-Path $scriptPath)) {
+              Write-Error "Required script not found at $scriptPath"
+              exit 1
+          }
+          & $scriptPath
+
+      - name: Upload Roblox install log
+        uses: actions/upload-artifact@v4
+        with:
+          name: roblox-install-log
+          path: ${{ env.TEMP }}\roblox-install-log.txt
+
       - name: Show RDP Info and Keep Alive
         shell: pwsh
         run: |
@@ -80,6 +213,7 @@ jobs:
           Write-Host "Username: RDP"
           Write-Host "Password: @ayonij123"
           Write-Host "================================================"
+          Write-Host "Roblox install log has been uploaded as artifact 'roblox-install-log'."
           while ($true) {
               Write-Host "🟢 VM running at: $(Get-Date)"
               Start-Sleep -Seconds 60
