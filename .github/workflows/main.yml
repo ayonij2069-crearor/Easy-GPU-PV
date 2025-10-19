@@ -38,78 +38,10 @@ jobs:
           Set-VMProcessor -VMName $VMName -Count $CPU
           Write-Host "✅ VM created successfully."
 
-      - name: Configure RDP and User
+      - name: Start Windows VM
         shell: pwsh
         run: |
-          Write-Host "🛠️ Enabling RDP and creating user..."
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          netsh advfirewall firewall add rule name="RDP-Allow" dir=in action=allow protocol=TCP localport=3389
-          $securePlain = "@ayonij123"
-          $securePass = ConvertTo-SecureString $securePlain -AsPlainText -Force
-          if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
-              New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
-              Add-LocalGroupMember -Group "Administrators" -Member "RDP"
-              Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
-          } else {
-              (Get-LocalUser -Name "RDP") | Set-LocalUser -Password $securePass
-          }
-          echo "RDP_PASSWORD=$securePlain" >> $env:GITHUB_ENV
-          Write-Host "✅ RDP enabled. User created."
-
-      - name: Install and Connect Tailscale
-        shell: pwsh
-        env:
-          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
-        run: |
-          Write-Host "🌐 Installing and connecting to Tailscale..."
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installer = "$env:TEMP\tailscale.msi"
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installer
-          Start-Process msiexec.exe -ArgumentList "/i `"$installer`" /quiet /norestart" -Wait
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$env:TAILSCALE_AUTH_KEY --hostname=gh-gpu-vm
-          $ip = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-          echo "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV
-          Write-Host "✅ Connected to Tailscale with IP: $ip"
-
-      - name: Install Roblox Automatically
-        shell: pwsh
-        run: |
-          Write-Host "🎮 Installing Roblox..."
-          $robloxUrl = "https://setup.rbxcdn.com/RobloxPlayerLauncher.exe"
-          $robloxInstaller = "$env:TEMP\RobloxPlayerLauncher.exe"
-          Invoke-WebRequest -Uri $robloxUrl -OutFile $robloxInstaller
-          Start-Process -FilePath $robloxInstaller -ArgumentList "/silent" -Wait
-          Write-Host "✅ Roblox installed."
-
-          Write-Host "🚀 Launching Roblox..."
-          $robloxExe = "$env:LOCALAPPDATA\Roblox\Versions"
-          if (Test-Path $robloxExe) {
-              $latest = Get-ChildItem $robloxExe | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-              Start-Process "$($latest.FullName)\RobloxPlayerBeta.exe"
-              Write-Host "✅ Roblox started."
-          } else {
-              Write-Host "⚠️ Roblox installation folder not found. It may install on first launch."
-          }
-
-      - name: Verify Roblox Installation
-        shell: pwsh
-        run: |
-          if (Test-Path "$env:LOCALAPPDATA\Roblox\Versions") {
-              Write-Host "🎯 Roblox installation verified!"
-          } else {
-              Write-Host "❌ Roblox not found."
-          }
-
-      - name: Show RDP Info and Keep Alive
-        shell: pwsh
-        run: |
-          Write-Host ""
-          Write-Host "================== RDP ACCESS =================="
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          Write-Host "Username: RDP"
-          Write-Host "Password: @ayonij123"
-          Write-Host "================================================"
-          while ($true) {
-              Write-Host "🟢 VM running at: $(Get-Date)"
-              Start-Sleep -Seconds 60
-          }
+          Write-Host "⚡ Starting the GPU VM..."
+          Start-VM -Name "GPU-VM"
+          Start-Sleep -Seconds 20
+          Write-
