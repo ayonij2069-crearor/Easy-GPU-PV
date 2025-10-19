@@ -1,70 +1,86 @@
-name: Windows VM Setup (No GPU Passthrough)
+name: GPU Windows VM Setup (with RDP & Tailscale)
 
 on:
   workflow_dispatch:
 
 jobs:
-  setup-windows-vm:
+  setup-gpu-vm:
     runs-on: windows-latest
     timeout-minutes: 360
 
     steps:
-      - name: Checkout your repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up PowerShell
+      - name: Enable Hyper-V
         shell: pwsh
         run: |
-          Write-Host "✅ PowerShell environment ready."
-          Write-Host "Working Directory: $env:GITHUB_WORKSPACE"
+          dism.exe /Online /Enable-Feature:Microsoft-Hyper-V /All
+          Write-Host "✅ Hyper-V enabled."
 
-      - name: Create VM
+      - name: Create Windows VM
         shell: pwsh
         run: |
-          Write-Host "🖥️ Creating standard Windows VM..."
-          $VMName = "Windows-VM"
-          $VHDPath = "$env:GITHUB_WORKSPACE\$VMName.vhdx"
+          Write-Host "🖥️ Creating Windows VM..."
+          $VMName = "GPU-VM"
+          $VHDPath = "C:\HyperV\$VMName.vhdx"
+          $Memory = 4GB
+          $CPU = 4
+          $VHDSize = 60GB
 
-          # Create new VM with 4GB RAM and 4 cores
-          New-VM -Name $VMName -MemoryStartupBytes 4GB -Generation 2 -NewVHDPath $VHDPath -NewVHDSizeBytes 60GB
-          Set-VMProcessor -VMName $VMName -Count 4
-
-          Write-Host "✅ VM created successfully at $VHDPath"
-
-      - name: Configure VM Settings
-        shell: pwsh
-        run: |
-          $VMName = "Windows-VM"
-          Write-Host "⚙️ Configuring VM settings..."
-          Set-VM -Name $VMName -AutomaticStartAction StartIfRunning -AutomaticStopAction Save
-          Write-Host "✅ Configuration applied."
-
-      - name: Prepare VHD
-        shell: pwsh
-        run: |
-          $VMName = "Windows-VM"
-          $VM = Get-VM -VMName $VMName
-          $VHD = Get-VHD -VMId $VM.VMId
-
-          Write-Host "📂 Mounting VHD to verify..."
-          try {
-              $Volume = Mount-VHD -Path $VHD.Path -PassThru | Get-Disk | Get-Partition | Get-Volume | Where-Object {$_.DriveLetter} | Select-Object -First 1
-              Write-Host "✅ Mounted successfully at drive letter: $($Volume.DriveLetter)"
-          } catch {
-              Write-Host "⚠️ VHD mount skipped or failed: $($_.Exception.Message)"
+          if (Get-VM -Name $VMName -ErrorAction SilentlyContinue) {
+              Stop-VM -Name $VMName -Force -ErrorAction SilentlyContinue
+              Remove-VM -Name $VMName -Force -ErrorAction SilentlyContinue
+              Remove-Item -Path $VHDPath -Force -ErrorAction SilentlyContinue
           }
 
-          Write-Host "🔹 Dismounting VHD..."
-          Dismount-VHD -Path $VHD.Path -ErrorAction SilentlyContinue
+          New-VM -Name $VMName -MemoryStartupBytes $Memory -Generation 2 -NewVHDPath $VHDPath -NewVHDSizeBytes $VHDSize
+          Set-VMProcessor -VMName $VMName -Count $CPU
+          Write-Host "✅ VM created successfully."
 
-      - name: Start VM
+      - name: Configure RDP and User
         shell: pwsh
         run: |
-          Write-Host "🚀 Starting the VM..."
-          Start-VM -Name "Windows-VM"
-          Write-Host "✅ VM started successfully."
+          Write-Host "🛠️ Enabling RDP and creating user..."
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          netsh advfirewall firewall add rule name="RDP-Allow" dir=in action=allow protocol=TCP localport=3389
+          $securePlain = "@ayonij123"
+          $securePass = ConvertTo-SecureString $securePlain -AsPlainText -Force
+          if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
+              New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+              Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+              Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
+          } else {
+              (Get-LocalUser -Name "RDP") | Set-LocalUser -Password $securePass
+          }
+          echo "RDP_PASSWORD=$securePlain" >> $env:GITHUB_ENV
+          Write-Host "✅ RDP enabled. User created."
 
-      - name: Final Confirmation
+      - name: Install and Connect Tailscale
+        shell: pwsh
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          Write-Host "🌐 Installing and connecting to Tailscale..."
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installer = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installer
+          Start-Process msiexec.exe -ArgumentList "/i `"$installer`" /quiet /norestart" -Wait
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$env:TAILSCALE_AUTH_KEY --hostname=gh-gpu-vm
+          $ip = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+          echo "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV
+          Write-Host "✅ Connected to Tailscale with IP: $ip"
+
+      - name: Show RDP Info and Keep Alive
         shell: pwsh
         run: |
-          Write-Host "🎉 Windows VM setup completed successfully!"
+          Write-Host ""
+          Write-Host "================== RDP ACCESS =================="
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          Write-Host "Username: RDP"
+          Write-Host "Password: @ayonij123"
+          Write-Host "================================================"
+          while ($true) {
+              Write-Host "🟢 VM running at: $(Get-Date)"
+              Start-Sleep -Seconds 60
+          }
