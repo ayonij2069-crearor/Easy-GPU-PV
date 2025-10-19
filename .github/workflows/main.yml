@@ -71,15 +71,19 @@ jobs:
           echo "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV
           Write-Host "✅ Connected to Tailscale with IP: $ip"
 
-      - name: Install Roblox Automatically
+           - name: Install Roblox (Silent)
         shell: pwsh
         run: |
-          Write-Host "🎮 Installing Roblox..."
+          Write-Host "🎮 Downloading Roblox setup..."
           $robloxUrl = "https://setup.rbxcdn.com/RobloxPlayerLauncher.exe"
-          $robloxInstaller = "$env:TEMP\RobloxPlayerLauncher.exe"
-          Invoke-WebRequest -Uri $robloxUrl -OutFile $robloxInstaller
-          Start-Process -FilePath $robloxInstaller -ArgumentList "/silent" -Wait
-          Write-Host "✅ Roblox installed."
+          $robloxPath = "$env:TEMP\RobloxPlayerLauncher.exe"
+          Invoke-WebRequest -Uri $robloxUrl -OutFile $robloxPath
+          
+          Write-Host "⚙️ Running silent Roblox install..."
+          Start-Process -FilePath $robloxPath -ArgumentList "/silent" -Wait
+          
+          Write-Host "✅ Roblox installed successfully."
+
 
           Write-Host "🚀 Launching Roblox..."
           $robloxExe = "$env:LOCALAPPDATA\Roblox\Versions"
